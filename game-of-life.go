@@ -1,7 +1,9 @@
 package main
 
 import (
+	"C"
 	"fmt"
+	"io/ioutil"
 	"time"
 
 	"github.com/nsf/termbox-go"
@@ -28,17 +30,32 @@ func main() {
 	termbox.SetOutputMode(termbox.Output256)
 	termbox.SetFg(0, 0, fgColor)
 
-	// Initialize CUDA
-	err = cuda.Init()
+	// Get the first CUDA device
+	devices, err := cuda.AllDevices()
 	if err != nil {
 		panic(err)
 	}
-	defer cuda.Close()
+	if len(devices) == 0 {
+		panic("no CUDA devices found")
+	}
+	device := devices[0]
+
+	// Create a CUDA context for the device
+	ctx, err := cuda.NewContext(device, 10)
+	if err != nil {
+		panic(err)
+	}
+
+	// Create a garbage-collected allocator for the context
+	allocator := cuda.GCAllocator(cuda.NativeAllocator(ctx), 0)
 
 	// Perform a GPU parallelized calculation and display the results in real-time
 	for i := 0; i < 10; i++ {
 		// Perform the calculation using GPU parallelization
-		result := performCalculationOnGPU(i)
+		result, err := performCalculationOnGPU(ctx, allocator, i)
+		if err != nil {
+			panic(err)
+		}
 
 		// Clear the screen
 		termbox.Clear(bgColor, bgColor)
@@ -54,30 +71,47 @@ func main() {
 	}
 }
 
-func performCalculationOnGPU(i int) int {
+func performCalculationOnGPU(ctx *cuda.Context, allocator cuda.Allocator, i int) (int, error) {
 	// Allocate memory on the GPU
-	deviceInt := cuda.Malloc(1)
-	defer cuda.Free(deviceInt)
+	deviceInt, err := cuda.AllocBuffer(allocator, 1)
+	if err != nil {
+		return 0, err
+	}
+	defer allocator.Free(deviceInt.Pointer, deviceInt.Size())
 
 	// Copy the input value to the GPU memory
-	cuda.MemcpyHtoD(deviceInt, &i, 1)
-
-	// Launch a GPU kernel to perform the calculation
-	// Replace "calculationKernel" with the name of your kernel function
-	blockDim, gridDim := cuda.Dim3{1, 1, 1}, cuda.Dim3{1, 1, 1}
-	kernel := cuda.Kernel{
-		Name:      "calculationKernel",
-		BlockSize: blockDim,
-		GridSize:  gridDim,
-	}
-	err := kernel.Launch(deviceInt)
+	err = cuda.WriteBuffer(deviceInt, []int{i})
 	if err != nil {
-		panic(err)
+		return 0, err
+	}
+
+	// Read the contents of the .ptx file into a slice of bytes
+	bytes, err := ioutil.ReadFile("path/to/file.ptx")
+	if err != nil {
+		// Handle the error
+		return
+	}
+
+	// Convert the slice of bytes to a string
+	ptxString := string(bytes)
+
+	thing, err = cuda.NewModule(ctx, ptxString)
+	if err != nil {
+		return 0, err
+	}
+
+	blockDim, gridDim := cuda.Dim3{1, 1, 1}, cuda.Dim3{1, 1, 1}
+	err = thing.Launch("calculationKernel", blockDim, gridDim)
+	if err != nil {
+		return 0, err
 	}
 
 	// Copy the result back from the GPU to the host
 	var result int
-	cuda.MemcpyDtoH(&result, deviceInt, 1)
+	err = cuda.ReadBuffer(deviceInt, []int{result})
+	if err != nil {
+		return 0, err
+	}
 
-	return result
+	return result, nil
 }
